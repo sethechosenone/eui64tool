@@ -3,6 +3,10 @@ use std::process::exit;
 use getifs::interfaces;
 use regex::Regex;
 
+use crate::options::options::handle_flag;
+
+mod options;
+
 fn to_eui64(mac_addr: String) -> String {
 	let mut mac_segments: Vec<&str> = mac_addr.split(':').collect();
 	let mut suffix_segments: [String; 4] = [const { String::new() }; 4]; 
@@ -141,9 +145,9 @@ fn main() {
 					}
 				}
 			} else {
-				// check for help flag
-                if input == "-h" || input == "--help" {
-                    println!("usage: eui64tool [ifname] [mac_address] [ipv6_eui64_address] [ipv6_eui64_suffix]");
+				// check for options
+                if input.starts_with('-') {
+                    handle_flag(input);
                 } else {
                     // no other possible way to interpret this input -- it's completely invalid
 				    eprintln!("Error: '{}' is not a valid interface, MAC address, or IPv6 address", input);
