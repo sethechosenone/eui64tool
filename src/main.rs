@@ -4,52 +4,18 @@ use getifs::interfaces;
 use regex::Regex;
 
 use crate::options::options::handle_flag;
+use crate::conversions::conversions::{to_eui64, from_eui64};
 
 mod options;
+mod conversions;
 
-fn to_eui64(mac_addr: String) -> String {
-	let mut mac_segments: Vec<&str> = mac_addr.split(':').collect();
-	let mut suffix_segments: [String; 4] = [const { String::new() }; 4]; 
-	let mut result: String;
-	
-	// flip 7th bit of first MAC segment
-	let mut first_segment_int: u8 = u8::from_str_radix(mac_segments[0], 16).expect("Invalid first MAC segment, somehow");
-	first_segment_int ^= 0x02;
-	let new_first_segment = &format!("{:02x}", first_segment_int);
-	mac_segments[0] = new_first_segment;
-
-	// assemble suffix
-	suffix_segments[0] = mac_segments[0].to_owned() + mac_segments[1];
-	suffix_segments[1] = mac_segments[2].to_owned() + "ff";
-	suffix_segments[2] = String::from("fe") + mac_segments[3];
-	suffix_segments[3] = mac_segments[4].to_owned() + mac_segments[5];
-
-	result = suffix_segments.join(":");
-	result.insert(0, ':');
-
-	result
-}
-
-fn from_eui64(eui64_suffix: String) -> String {
-	let suffix_segments: Vec<&str> = eui64_suffix.split(':').collect();
-
-	// split into 8-bit colon-separated bytes
-	let mut bytes: Vec<String> = Vec::new();
-	for segment in suffix_segments.iter().skip(1) { // first element is :, so skip
-		bytes.push(segment[0..2].to_string());
-		bytes.push(segment[2..4].to_string());
-	}
-
-	// remove ff:fe
-	bytes.remove(3);
-	bytes.remove(3);
-
-	// flip 7th bit of first byte
-	let mut first_byte_int: u8 = u8::from_str_radix(&bytes[0], 16).expect("Invalid IPv6 suffix segment, somehow");
-	first_byte_int ^= 0x02;
-	bytes[0] = format!("{:02x}", first_byte_int);
-
-	bytes.join(":")
+enum InputType {
+	Interface(String),
+	MacAddress(String),
+	Ipv6Address(String),
+	Eui64Suffix(String),
+	Flag(String),
+	Invalid(String),
 }
 
 fn expand_ipv6(ipv6: &str) -> String {
@@ -76,88 +42,121 @@ fn expand_ipv6(ipv6: &str) -> String {
 	expanded.join(":")
 }
 
-fn main() {
-	let args: Vec<String> = args().collect();
+fn classify_input(input: &str) -> InputType {
+	// check for flags first
+	if input.starts_with('-') {
+		return InputType::Flag(input.to_string());
+	}
+
+	// check for interface name
+	let interfaces = interfaces().unwrap();
+	if interfaces.iter().any(|i| i.name() == input) {
+		return InputType::Interface(input.to_string());
+	}
+
+	// check regex patterns
+	let mac_regex = Regex::new(r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$").unwrap();
+	let eui64_suffix_regex = Regex::new(r"^:([0-9a-fA-F]{4}:){3}[0-9a-fA-F]{4}$").unwrap();
+	let ipv6_regex = Regex::new(r"^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$").unwrap();
+
+	if mac_regex.is_match(input) {
+		InputType::MacAddress(input.to_string())
+	} else if eui64_suffix_regex.is_match(input) {
+		InputType::Eui64Suffix(input.to_string())
+	} else if ipv6_regex.is_match(input) {
+		InputType::Ipv6Address(input.to_string())
+	} else {
+		InputType::Invalid(input.to_string())
+	}
+}
+
+fn handle_interface(name: &str) {
 	let interfaces = interfaces().unwrap();
 
-	if args.len() > 1 {
-		// argument provided
-		let input = &args[1];
-
-		if let Some(iface) = interfaces.iter().find(|i| i.name() == input) {
-			// argument is iface, run on iface
-			if let Some(mac_addr) = iface.mac_addr() {
-				println!("IPv6 EUI-64 suffix for {}: {}", iface.name(), to_eui64(mac_addr.to_string()));
-			} else {
-				eprintln!("Error: Interface '{}' has no MAC address", input);
-				exit(1);
-			}
+	if let Some(iface) = interfaces.iter().find(|i| i.name() == name) {
+		if let Some(mac_addr) = iface.mac_addr() {
+			println!("IPv6 EUI-64 suffix for {}: {}", iface.name(), to_eui64(mac_addr.to_string()));
 		} else {
-			// argument not iface, check if it's a valid MAC address or IPv6
-			let mac_regex = Regex::new(r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$").unwrap();
-			let eui64_suffix_regex = Regex::new(r"^:([0-9a-fA-F]{4}:){3}[0-9a-fA-F]{4}$").unwrap();
-			let ipv6_regex = Regex::new(r"^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$").unwrap();
+			eprintln!("Error: Interface '{}' has no MAC address", name);
+			exit(1);
+		}
+	}
+}
 
-			if mac_regex.is_match(input) {
-				// argument is MAC address, convert to EUI-64
-				println!("IPv6 EUI-64 suffix for {}: {}", input, to_eui64(input.clone()));
-			} else if eui64_suffix_regex.is_match(input) || ipv6_regex.is_match(input) {
-				// argument is IPv6 or EUI-64 suffix, convert to MAC
-				let suffix = if input.starts_with(':') {
-					// pad segments to 4 chars
-					let parts: Vec<&str> = input.split(':').skip(1).collect();
-					let padded = parts.iter()
-						.map(|s| format!("{:0>4}", s))
-						.collect::<Vec<_>>()
-						.join(":");
+fn handle_mac_address(mac: &str) {
+	println!("IPv6 EUI-64 suffix for {}: {}", mac, to_eui64(mac.to_string()));
+}
 
-					format!(":{}", padded)
-				} else {
-					// convert full IPv6 to just suffix
-					let expanded = expand_ipv6(input);
-					let parts: Vec<&str> = expanded.split(':').collect();
-					// pad each segment to 4 characters and take last 4
-					let suffix_part = parts.iter()
-						.rev()
-						.take(4)
-						.rev()
-						.map(|s| format!("{:0>4}", s))
-						.collect::<Vec<_>>()
-						.join(":");
+fn handle_ipv6_or_suffix(input: &str) {
+	let suffix = if input.starts_with(':') {
+		// pad segments to 4 chars
+		let parts: Vec<&str> = input.split(':').skip(1).collect();
+		let padded = parts.iter()
+			.map(|s| format!("{:0>4}", s))
+			.collect::<Vec<_>>()
+			.join(":");
 
-					format!(":{}", suffix_part)
-				};
+		format!(":{}", padded)
+	} else {
+		// convert full IPv6 to just suffix
+		let expanded = expand_ipv6(input);
+		let parts: Vec<&str> = expanded.split(':').collect();
 
-				// validate that this is actually an EUI-64 address before converting
-				let suffix_parts: Vec<&str> = suffix.split(':').skip(1).collect();
-				if suffix_parts.len() != 4 {
-					eprintln!("Error: '{}' is not a valid EUI-64 address", input);
-					exit(1);
-				} else {
-					// check for ff:fe marker in the middle (across parts[1] and parts[2])
-					let byte3 = &suffix_parts[1][2..4];
-					let byte4 = &suffix_parts[2][0..2];
-					if byte3.to_lowercase() != "ff" || byte4.to_lowercase() != "fe" {
-						eprintln!("Error: '{}' is not a valid EUI-64 address (missing ff:fe marker)", input);
-						exit(1);
-					} else {
-						println!("MAC address for {}: {}", input, from_eui64(suffix));
-					}
-				}
-			} else {
-				// check for options
-                if input.starts_with('-') {
-                    handle_flag(input);
-                } else {
-                    // no other possible way to interpret this input -- it's completely invalid
-				    eprintln!("Error: '{}' is not a valid interface, MAC address, or IPv6 address", input);
-				    exit(1);
-                }
-			}
+		// pad each segment to 4 characters and take last 4
+		let suffix_part = parts.iter()
+			.rev()
+			.take(4)
+			.rev()
+			.map(|s| format!("{:0>4}", s))
+			.collect::<Vec<_>>()
+			.join(":");
+
+		format!(":{}", suffix_part)
+	};
+
+	// validate that this is actually an EUI-64 address before converting
+	let suffix_parts: Vec<&str> = suffix.split(':').skip(1).collect();
+	if suffix_parts.len() != 4 {
+		eprintln!("Error: '{}' is not a valid EUI-64 address", input);
+		exit(1);
+	}
+
+	// check for ff:fe marker in the middle (across parts[1] and parts[2])
+	let byte3 = &suffix_parts[1][2..4];
+	let byte4 = &suffix_parts[2][0..2];
+	if byte3.to_lowercase() != "ff" || byte4.to_lowercase() != "fe" {
+		eprintln!("Error: '{}' is not a valid EUI-64 address (missing ff:fe marker)", input);
+		exit(1);
+	}
+
+	println!("MAC address for {}: {}", input, from_eui64(suffix));
+}
+
+fn handle_input(input_type: InputType) {
+	match input_type {
+		InputType::Interface(name) => handle_interface(&name),
+		InputType::MacAddress(mac) => handle_mac_address(&mac),
+		InputType::Ipv6Address(ipv6) => handle_ipv6_or_suffix(&ipv6),
+		InputType::Eui64Suffix(suffix) => handle_ipv6_or_suffix(&suffix),
+		InputType::Flag(flag) => handle_flag(&flag),
+		InputType::Invalid(input) => {
+			eprintln!("Error: '{}' is not a valid interface, MAC address, or IPv6 address", input);
+			exit(1);
+		}
+	}
+}
+
+fn main() {
+	let args: Vec<String> = args().collect();
+
+	if args.len() > 1 {
+		// argument provided, classify and handle it
+		for i in 1..args.len() {
+			handle_input(classify_input(&args[i]));
 		}
 	} else {
-		// no argument provided, run on every iface
-		for iface in interfaces {
+		// no argument provided, list all interfaces
+		for iface in interfaces().unwrap() {
 			if let Some(mac_addr) = iface.mac_addr() {
 				println!("IPv6 EUI-64 suffix for {}: {}", iface.name(), to_eui64(mac_addr.to_string()));
 			}
